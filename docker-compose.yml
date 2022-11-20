@@ -97,6 +97,14 @@ services:
       retries: 50
     restart: always
 
+  cassandra:
+    container_name: cassandra_app
+    image: cassandra:latest
+    ports:
+      - 9042:9042
+    volumes:
+      - ~/apps/cassandra:/var/lib/cassandra
+
   airflow-webserver:
     <<: *airflow-common
     command: webserver
