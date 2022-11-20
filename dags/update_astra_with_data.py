@@ -25,6 +25,7 @@ default_args = {
 
 def extract_from_xml(file_to_process):
     # define classes
+    '''
     class Author(object):
         def __init__(self, name, orcid, pid):
             self.name = name
@@ -36,7 +37,7 @@ def extract_from_xml(file_to_process):
             self.number = number
             self.volume = volume
             self.pages = pages
-
+    '''
     # define functions to extract fields from xml file structure of dblp's APIs
     def getFields(r):
         rec = r[0] # get to record tag (<article>, <inproceedings>, etc.) per <r>
@@ -47,10 +48,10 @@ def extract_from_xml(file_to_process):
         pub_attribs["title"] = rec.find("title").text if rec.find("title") is not None else None
         pub_attribs["year"] = int(rec.find("year").text) if rec.find("year") is not None else None
         pub_attribs["rec_type"] = rec.tag
-        pub_attribs["authors"] = getAuthors(rec)
+        #pub_attribs["authors"] = getAuthors(rec)
         pub_attribs["category"] = getCategory(rec)
         pub_attribs["publisher"] = getPublisher(rec)
-        pub_attribs["position"] = getPosition(rec)
+        #pub_attribs["position"] = getPosition(rec)
         pub_attribs["ee"] = rec.find("ee").text if rec.find("ee") is not None else None
         pub_attribs["url"] = rec.find("url").text if rec.find("url") is not None else None
         pub_attribs["crossref"] = rec.find("crossref").text if rec.find("crossref") is not None else None
@@ -65,6 +66,7 @@ def extract_from_xml(file_to_process):
         category = paper_key.split("/")[0]
         return category[:-1] if category[-1] == "s" else category
 
+    '''
     def getAuthors(rec):
         authors = dict()
         i = 1
@@ -75,20 +77,20 @@ def extract_from_xml(file_to_process):
             authors[i] = Author(name, orcid, pid)
             i += 1
         return authors
-
+    '''
     def getPublisher(rec): # assuming each record only has one of the 3 tags
         tag_filter = ["booktitle", "journal", "publisher"]
         results = [rec.find(t).text if rec.find(t) is not None else None for t in tag_filter]
         for res in results:
             if res != None:
                 return res
-
+    '''
     def getPosition(rec):
         number = rec.find("number").text if rec.find("number") is not None else None
         volume = rec.find("volume").text if rec.find("volume") is not None else None
         pages = rec.find("pages").text if rec.find("pages") is not None else None
         return Position(number, volume, pages)
-
+    '''
     # parse an xml file
     tree = ET.parse(file_to_process)
     root = tree.getroot()
@@ -111,10 +113,8 @@ def create_table_with_data(session, primarykey_setting, raw_xml_path):
         title text,
         year int,
         type text,
-        authors map<int, FROZEN<author>>,
         category text,
         publisher text,
-        position FROZEN<position>,
         ee text,
         url text,
         crossref text,
@@ -129,15 +129,13 @@ def create_table_with_data(session, primarykey_setting, raw_xml_path):
         title,
         year,
         type,
-        authors,
         category,
         publisher,
-        position,
         ee,
         url,
         crossref,
         mdate
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?);
+    ) VALUES (?,?,?,?,?,?,?,?,?,?);
     """
     insert_statement = session.prepare(insert_data)
 
@@ -148,10 +146,10 @@ def create_table_with_data(session, primarykey_setting, raw_xml_path):
             pub["title"],
             pub["year"],
             pub["rec_type"],
-            pub["authors"],
+            #pub["authors"],
             pub["category"],
             pub["publisher"],
-            pub["position"],
+            #pub["position"],
             pub["ee"],
             pub["url"],
             pub['crossref'],
@@ -162,8 +160,11 @@ def create_table_with_data(session, primarykey_setting, raw_xml_path):
 cloud_config = {'secure_connect_bundle': AIRFLOW_HOME + '/dags/secure-connect-dblp.zip'}
 auth_provider = PlainTextAuthProvider('ID', 'TOKEN')
 
+def tryout():
+    print("trying this out!")
+
 def checkdbconnection():
-    cluster = Cluster(cloud=cloud_config, auth_provider=auth_provider)
+    cluster = Cluster(cloud=cloud_config, auth_provider=auth_provider, protocol_version=4)
     session = cluster.connect()
     row = session.execute("SELECT release_version FROM system.local").one()
     if row:
@@ -172,33 +173,38 @@ def checkdbconnection():
         print("An error occurred.")
 
 def updateclouddbdata():
-    cluster = Cluster(cloud=cloud_config, auth_provider=auth_provider)
+    cluster = Cluster(cloud=cloud_config, auth_provider=auth_provider, protocol_version=4)
     session = cluster.connect()
-    session.set_keyspace("dblp")
+    session.set_keyspace("publication")
 
     drop_table(session)
     url = "https://dblp.org/pid/o/BengChinOoi.xml" # insert later!
     response = requests.get(url)
-    with open("xmlfile.xml", "wb+") as f:
+    with open(AIRFLOW_HOME + "/dags/xmlfile.xml", "wb+") as f:
         f.write(response.content)
         f.close()
-    pub_ls = create_table_with_data(session, "(category, year, paper_key)", "xmlfile.xml")
+    pub_ls = create_table_with_data(session, "paper_key", AIRFLOW_HOME + "/dags/xmlfile.xml")
 
 def queryclouddbdata():
-    cluster = Cluster(cloud=cloud_config, auth_provider=auth_provider)
+    cluster = Cluster(cloud=cloud_config, auth_provider=auth_provider, protocol_version=4)
     session = cluster.connect()
-    session.set_keyspace("dblp")
+    session.set_keyspace("publication")
     result = session.execute("SELECT COUNT(*) FROM publication;").one()[0]
 
 with DAG(
-    "update_cassandra_with_web_data",
+    "update_astra_with_data",
     default_args=default_args,
     description="update Astra DB with dblp data pf one author's publication record",
     schedule_interval=None, #timedelta(seconds=300),
-    start_date=datetime(2022, 11, 20),
+    start_date=datetime(2022, 11, 15),
     catchup=False,
     tags=["dblp"]
 ) as dag:
+    try_out = PythonOperator(
+        task_id="try_out",
+        python_callable=tryout
+    )
+
     check_dbconnection = PythonOperator(
         task_id="check_connection",
         python_callable=checkdbconnection
@@ -214,4 +220,4 @@ with DAG(
         python_callable=queryclouddbdata
     )
 
-    check_dbconnection >> update_clouddb_data >> query_clouddb_data
+    try_out >> check_dbconnection >> update_clouddb_data >> query_clouddb_data
