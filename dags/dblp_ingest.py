@@ -7,7 +7,7 @@ import pandas as pd
 import xml.etree.ElementTree as et
 import requests
 import os
-
+from pathlib import Path
 
 # set up config
 
@@ -33,17 +33,13 @@ def drop_publication_table(session):
     """
     session.execute(drop_tb)
 
-def drop_num_publication_table(session):
-    drop_tb = """
-    DROP TABLE IF EXISTS num_publication;
-    """
-    session.execute(drop_tb)
-
-def transform_data_for_publication(xml_path):
+def transform_data_for_publication(xml_folder_path):
     """Extract data from xml file and transform into format suited for the publication table"""
+
     def get_fields(root):
         person = root[0]
         pid = person.find("author").attrib.get("pid") # o/BengChinOoi
+        print("PRINTING THISSSSSSSSSSSS THE PID", pid)
 
         records = [] # we'll populate this list with all records (ie publications) of the same author found in root
         for r in root[1:-1]:
@@ -55,6 +51,7 @@ def transform_data_for_publication(xml_path):
             attribs["year"] = int(rec.find("year").text) if rec.find("year") is not None else None
             attribs["position"] = get_position(attribs["pid"], rec)
             attribs["paper_key"] = rec.attrib.get("key")
+            print("HERE", attribs)
 
             records.append(attribs)
         
@@ -63,7 +60,10 @@ def transform_data_for_publication(xml_path):
     def get_position(pid_to_find, rec) -> int:
         "Get position of author (identified by pid_to_find) within list of authors of the record, rec. E.g. 1st, 2nd author"
         i = 1
-        for author in rec.findall("author"):
+        authors = rec.findall("author")
+        if len(authors) == 0:
+            return 0            
+        for author in authors:
             if author.get("pid") == pid_to_find:
                 return i
             else:
@@ -74,15 +74,61 @@ def transform_data_for_publication(xml_path):
         if not paper_id:
             return None
         category = paper_id.split("/")[0]
-        return category[:-1] if category[-1] == "s" else category
+        return category #[:-1] if category[-1] == "s" else category
 
-    tree = et.parse(xml_path)
-    root = tree.getroot()
-    records = get_fields(root)
+    paths = Path(xml_folder_path).glob("*.xml")
+    print("PUBLICATION TABLE ------ ")
+    records = []
+    for xml_path in paths:
+        print("transforming", str(xml_path))
+        tree = et.parse(xml_path)
+        root = tree.getroot()
+        records.extend(get_fields(root))
 
     return records
 
-def transform_data_for_num_publication(xml_path):
+def create_publication_table(session, primary_key, xml_folder_path):
+    create_tb = f"""
+    CREATE TABLE IF NOT EXISTS publication (
+        pid text,
+        category text,
+        year int,
+        position int,
+        paper_key text,
+        PRIMARY KEY {primary_key}
+    );
+    """
+    session.execute(create_tb)
+
+    insert_data = """
+    INSERT INTO publication (
+        pid,
+        category,
+        year,
+        position,
+        paper_key
+    ) VALUES (?,?,?,?,?) IF NOT EXISTS;
+    """
+    insert_statement = session.prepare(insert_data)
+
+    records = transform_data_for_publication(xml_folder_path)
+    for rec in records:
+        attrib_ls = [
+            rec["pid"],
+            rec["category"],
+            rec["year"],
+            rec["position"],
+            rec["paper_key"]
+        ]
+        session.execute(insert_statement, attrib_ls)
+
+def drop_collaboration_table(session):
+    drop_tb = """
+    DROP TABLE IF EXISTS collaboration;
+    """
+    session.execute(drop_tb)
+
+def transform_data_for_collaboration(xml_folder_path):
     def get_fields(root):
         person = root[0]
         pid = person.find("author").attrib.get("pid") # o/BengChinOoi
@@ -112,84 +158,31 @@ def transform_data_for_num_publication(xml_path):
 
         return records
 
-    tree = et.parse(xml_path)
-    root = tree.getroot()
-    return get_fields(root)
+    paths = Path(xml_folder_path).glob("*.xml")
+    print("COLLABORATION TABLE ------ ")
+    records = []
+    for xml_path in paths:
+        print("transforming", str(xml_path))
+        tree = et.parse(xml_path)
+        root = tree.getroot()
+        records.extend(get_fields(root))
 
-'''
-def transform_data_for_num_publication(xml_path):
-    def get_fields(root):
-        person = root[0]
-        pid = person.find("author").attrib.get("pid") # o/BengChinOoi
+    return records
 
-        records = []
-        for r in root[1:-1]:
-            rec = r[0]
-            
-            for coauthor in rec.findall("author"):
-                attribs = {}
-                attribs["pid"] = pid
-                attribs["paper_key"] = rec.attrib.get("key")
-                attribs["year"] = int(rec.find("year").text) if rec.find("year") is not None else None
-                attribs["coauthor_pid"] = coauthor.attrib.get("pid")
-                
-                records.append(attribs)
-        return records
-
-    tree = et.parse(xml_path)
-    root = tree.getroot()
-    return get_fields(root)
-'''
-
-def create_publication_table(session, primary_key, xml_path):
+def create_collaboration_table(session, primary_key, xml_folder_path):
     create_tb = f"""
-    CREATE TABLE IF NOT EXISTS publication (
-        pid text,
-        category text,
-        year int,
-        position int,
-        paper_key text,
-        PRIMARY KEY {primary_key}
-    );
-    """
-    session.execute(create_tb)
-
-    insert_data = """
-    INSERT INTO publication (
-        pid,
-        category,
-        year,
-        position,
-        paper_key
-    ) VALUES (?,?,?,?,?) IF NOT EXISTS;
-    """
-    insert_statement = session.prepare(insert_data)
-
-    records = transform_data_for_publication(xml_path)
-    for rec in records:
-        attrib_ls = [
-            rec["pid"],
-            rec["category"],
-            rec["year"],
-            rec["position"],
-            rec["paper_key"]
-        ]
-        session.execute(insert_statement, attrib_ls)
-
-def create_num_publication_table(session, primary_key, xml_path):
-    create_tb = f"""
-    CREATE TABLE IF NOT EXISTS num_publication (
+    CREATE TABLE IF NOT EXISTS collaboration (
         pid text,
         year int,
         coauthor_pid text,
         paper_count int,
         PRIMARY KEY {primary_key}
-    ) WITH CLUSTERING ORDER BY (paper_count DESC);
+    ) WITH CLUSTERING ORDER BY (year DESC, coauthor_pid ASC, paper_count DESC);
     """
     session.execute(create_tb)
 
     insert_data = """
-    INSERT INTO num_publication (
+    INSERT INTO collaboration (
         pid,
         year,
         coauthor_pid,
@@ -198,7 +191,7 @@ def create_num_publication_table(session, primary_key, xml_path):
     """
     insert_statement = session.prepare(insert_data)
 
-    records = transform_data_for_num_publication(xml_path)
+    records = transform_data_for_collaboration(xml_folder_path)
     for rec in records:
         print(rec, "\n")
         attrib_ls = [
@@ -215,26 +208,27 @@ def create_num_publication_table(session, primary_key, xml_path):
 def fetch_data_and_write_files():
     pids = pd.read_csv(AIRFLOW_HOME + "/dags/input/cs_researchers.csv")["PID"].tolist()
 
-    for pid in pids[:1]:
+    for i in range(3): #range(len(pids)):
+        pid = pids[i]
         url = f"https://dblp.org/pid/{pid}.xml"
         response = requests.get(url)
 
         if response.status_code != 200:
             continue
-        
-        with open(AIRFLOW_HOME + "/dags/data/dblp_records.xml", "wb+") as f:
+
+        with open(AIRFLOW_HOME + f"/dags/data/dblp_records_{i}.xml", "wb+") as f:
             f.write(response.content)
             f.close()
 
 def insert_data_into_publication():
     session = hook.get_conn()
     drop_publication_table(session)
-    create_publication_table(session, "((pid), category, position, year, paper_key)", AIRFLOW_HOME + "/dags/data/dblp_records.xml")
+    create_publication_table(session, "((pid), category, position, year, paper_key)", AIRFLOW_HOME + "/dags/data")
 
-def insert_data_into_num_publication():
+def insert_data_into_collaboration():
     session = hook.get_conn()
-    drop_num_publication_table(session)
-    create_num_publication_table(session, "((pid), year, coauthor_pid, paper_count)", AIRFLOW_HOME + "/dags/data/dblp_records.xml")
+    drop_collaboration_table(session)
+    create_collaboration_table(session, "((pid), year, coauthor_pid, paper_count)", AIRFLOW_HOME + "/dags/data")
 
 with DAG(
     "dblp_ingest",
@@ -255,35 +249,41 @@ with DAG(
         python_callable=insert_data_into_publication
     )
 
-    insert_into_num_publication = PythonOperator(
-        task_id="insert_into_num_publication",
-        python_callable=insert_data_into_num_publication
+    insert_into_collaboration = PythonOperator(
+        task_id="insert_into_collaboration",
+        python_callable=insert_data_into_collaboration
     )
 
-    fetch_and_write_data >> [insert_into_publication, insert_into_num_publication]
+    fetch_and_write_data >> [insert_into_publication, insert_into_collaboration]
 
 '''
 Q1:
 SELECT pid, COUNT(paper_key) AS num_conf_papers
-... FROM publication
-... WHERE pid = '40/2499'
-... AND category = 'conf'
-... AND position = 3
-... AND year > 2011 AND year < 2023;
+    FROM publication
+    WHERE pid = '40/2499'
+    AND category = 'conf'
+    AND position = 3
+    AND year > 2011 AND year < 2023;
 
 Q2:
 SELECT pid, COUNT(paper_key) AS num_of_pubs
     FROM publication
     WHERE pid = 'o/BengChinOoi'
-    AND category IN ('journal', 'conf', 'serie', 'reference')
+    AND category IN ('journals', 'conf', 'series', 'reference', 'books')
     AND position = 2
     AND year > 2016 AND year < 2023;
 
 Q3:
 SELECT pid, coauthor_pid, paper_count
-    ... FROM num_publication
-    ... WHERE pid = '40/2499'
-    ... GROUP BY pid, coauthor_pid;
+    FROM collaboration
+    WHERE pid = '40/2499'
+    GROUP BY pid, year, coauthor_pid;
 
+Q4:
+SELECT coauthor_pid, year, MAX(paper_count) AS paper_count
+    FROM collaboration
+    WHERE pid = 'o/BengChinOoi'
+    AND year = 2020
+    GROUP BY pid, year, coauthor_pid;
 
 '''
