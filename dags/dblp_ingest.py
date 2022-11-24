@@ -3,16 +3,21 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.apache.cassandra.hooks.cassandra import CassandraHook
 from cassandra.cluster import Cluster
+from cassandra.auth import PlainTextAuthProvider
 import pandas as pd
 import xml.etree.ElementTree as et
 import requests
 import os
 from pathlib import Path
 
+
 # set up config
 
 hook = CassandraHook("cassandra_app")
 AIRFLOW_HOME = os.getenv("AIRFLOW_HOME")
+
+cloud_config = {'secure_connect_bundle': AIRFLOW_HOME + '/dags/secure-connect-dblp.zip'}
+auth_provider = PlainTextAuthProvider('ID', 'TOKEN')
 
 default_args = {
     "owner": "tzemin",
@@ -25,7 +30,7 @@ default_args = {
 }
 
 
-# define internal functions
+# update local database: define internal functions
 
 def drop_publication_table(session):
     drop_tb = """
@@ -39,7 +44,6 @@ def transform_data_for_publication(xml_folder_path):
     def get_fields(root):
         person = root[0]
         pid = person.find("author").attrib.get("pid") # o/BengChinOoi
-        print("PRINTING THISSSSSSSSSSSS THE PID", pid)
 
         records = [] # we'll populate this list with all records (ie publications) of the same author found in root
         for r in root[1:-1]:
@@ -51,7 +55,6 @@ def transform_data_for_publication(xml_folder_path):
             attribs["year"] = int(rec.find("year").text) if rec.find("year") is not None else None
             attribs["position"] = get_position(attribs["pid"], rec)
             attribs["paper_key"] = rec.attrib.get("key")
-            print("HERE", attribs)
 
             records.append(attribs)
         
@@ -74,10 +77,9 @@ def transform_data_for_publication(xml_folder_path):
         if not paper_id:
             return None
         category = paper_id.split("/")[0]
-        return category #[:-1] if category[-1] == "s" else category
+        return category
 
     paths = Path(xml_folder_path).glob("*.xml")
-    print("PUBLICATION TABLE ------ ")
     records = []
     for xml_path in paths:
         print("transforming", str(xml_path))
@@ -159,10 +161,8 @@ def transform_data_for_collaboration(xml_folder_path):
         return records
 
     paths = Path(xml_folder_path).glob("*.xml")
-    print("COLLABORATION TABLE ------ ")
     records = []
     for xml_path in paths:
-        print("transforming", str(xml_path))
         tree = et.parse(xml_path)
         root = tree.getroot()
         records.extend(get_fields(root))
@@ -193,7 +193,6 @@ def create_collaboration_table(session, primary_key, xml_folder_path):
 
     records = transform_data_for_collaboration(xml_folder_path)
     for rec in records:
-        print(rec, "\n")
         attrib_ls = [
             rec["pid"],
             rec["year"],
@@ -203,12 +202,12 @@ def create_collaboration_table(session, primary_key, xml_folder_path):
         session.execute(insert_statement, attrib_ls)
 
 
-# define functions as tasks
+# update local database: define internal functions
 
 def fetch_data_and_write_files():
     pids = pd.read_csv(AIRFLOW_HOME + "/dags/input/cs_researchers.csv")["PID"].tolist()
 
-    for i in range(3): #range(len(pids)):
+    for i in range(len(pids)): # range(3):
         pid = pids[i]
         url = f"https://dblp.org/pid/{pid}.xml"
         response = requests.get(url)
@@ -230,6 +229,151 @@ def insert_data_into_collaboration():
     drop_collaboration_table(session)
     create_collaboration_table(session, "((pid), year, coauthor_pid, paper_count)", AIRFLOW_HOME + "/dags/data")
 
+
+# query local database: define functions as tasks
+
+def query_publication_for_q1(session_local, session_cloud):
+    query_data = """
+    SELECT pid, COUNT(paper_key) AS num_conf_papers
+        FROM publication
+        WHERE pid = '40/2499'
+        AND category = 'conf'
+        AND position = 3
+        AND year > 2011 AND year < 2023;
+    """
+    rows = session_local.execute(query_data)
+
+    insert_data = """
+    INSERT INTO q1 (
+        pid,
+        num_conf_papers
+    ) VALUES (?,?) IF NOT EXISTS;
+    """
+    insert_statement = session_cloud.prepare(insert_data)
+
+    for (pid, num_conf_papers) in rows:
+        session_cloud.execute(insert_statement, [pid, num_conf_papers])
+
+def query_publication_for_q2(session_local, session_cloud):
+    query_data = """
+    SELECT pid, COUNT(paper_key) AS num_pubs
+        FROM publication
+        WHERE pid = 'o/BengChinOoi'
+        AND category IN ('journals', 'conf', 'series', 'reference', 'books')
+        AND position = 2
+        AND year > 2016 AND year < 2023;
+    """
+    rows = session_local.execute(query_data)
+
+    insert_data = """
+    INSERT INTO q2 (
+        pid,
+        num_pubs
+    ) VALUES (?,?)
+    """
+    insert_statement = session_cloud.prepare(insert_data)
+
+    for (pid, num_pubs) in rows:
+        session_cloud.execute(insert_statement, [pid, num_pubs])
+
+def query_collaboration_for_q3(session_local, session_cloud):
+    query_data = """
+    SELECT pid, coauthor_pid, paper_count
+        FROM collaboration
+        WHERE pid = '40/2499'
+        GROUP BY pid, year, coauthor_pid;
+    """
+    rows = session_local.execute(query_data)
+
+    insert_data = """
+    INSERT INTO q3 (
+        pid,
+        coauthor_pid,
+        paper_count
+    ) VALUES (?,?,?)    
+    """
+    insert_statement = session_cloud.prepare(insert_data)
+
+    for (pid, coauthor_pid, paper_count) in rows:
+        session_cloud.execute(insert_statement, [pid, coauthor_pid, paper_count])
+
+def query_collaboration_for_q4(session_local, session_cloud):
+    query_data = """
+    SELECT coauthor_pid, year, MAX(paper_count) AS paper_count
+        FROM collaboration
+        WHERE pid = 'o/BengChinOoi'
+        AND year = 2020
+        GROUP BY pid, year, coauthor_pid;
+    """
+    rows = session_local.execute(query_data)
+
+    insert_data = """
+    INSERT INTO q4 (
+        coauthor_pid,
+        year,
+        paper_count
+    ) VALUES (?,?,?)    
+    """
+    insert_statement = session_cloud.prepare(insert_data)
+
+    for (coauthor_pid, year, paper_count) in rows:
+        session_cloud.execute(insert_statement, [coauthor_pid, year, paper_count])
+
+
+# update cloud database: define functions as tasks
+
+def checkdbconnection():
+    cluster = Cluster(cloud=cloud_config, auth_provider=auth_provider, protocol_version=4)
+    session = cluster.connect()
+    row = session.execute("SELECT release_version FROM system.local").one()
+    if row:
+        print("Cassandra version", row[0])
+    else:
+        print("An error occurred.")
+
+def updateclouddb_q1():
+    cluster = Cluster(cloud=cloud_config, auth_provider=auth_provider, protocol_version=4)
+    session_cloud = cluster.connect()
+    session_cloud.set_keyspace("dblp")
+
+    session_local = hook.get_conn()
+    session_local.set_keyspace("dblp")
+    query_publication_for_q1(session_local, session_cloud)
+
+def updateclouddb_q2():
+    cluster = Cluster(cloud=cloud_config, auth_provider=auth_provider, protocol_version=4)
+    session_cloud = cluster.connect()
+    session_cloud.set_keyspace("dblp")
+
+    session_local = hook.get_conn()
+    session_local.set_keyspace("dblp")
+    query_publication_for_q2(session_local, session_cloud)
+
+def updateclouddb_q3():
+    cluster = Cluster(cloud=cloud_config, auth_provider=auth_provider, protocol_version=4)
+    session_cloud = cluster.connect()
+    session_cloud.set_keyspace("dblp")
+
+    session_local = hook.get_conn()
+    session_local.set_keyspace("dblp")
+    query_collaboration_for_q3(session_local, session_cloud)
+
+def updateclouddb_q4():
+    cluster = Cluster(cloud=cloud_config, auth_provider=auth_provider, protocol_version=4)
+    session_cloud = cluster.connect()
+    session_cloud.set_keyspace("dblp")
+
+    session_local = hook.get_conn()
+    session_local.set_keyspace("dblp")
+    query_collaboration_for_q4(session_local, session_cloud)
+
+def queryclouddbdata():
+    cluster = Cluster(cloud=cloud_config, auth_provider=auth_provider, protocol_version=4)
+    session = cluster.connect()
+    session.set_keyspace("publication")
+    session.execute("SELECT COUNT(*) FROM publication;").one()[0]
+
+
 with DAG(
     "dblp_ingest",
     default_args=default_args,
@@ -240,50 +384,43 @@ with DAG(
 ) as dag:
 
     fetch_and_write_data = PythonOperator(
-        task_id="fetch_and_write_data",
+        task_id="local_fetch_and_write_data",
         python_callable=fetch_data_and_write_files
     )
 
     insert_into_publication = PythonOperator(
-        task_id="insert_into_publication",
+        task_id="local_insert_into_publication",
         python_callable=insert_data_into_publication
     )
 
     insert_into_collaboration = PythonOperator(
-        task_id="insert_into_collaboration",
+        task_id="local_insert_into_collaboration",
         python_callable=insert_data_into_collaboration
     )
 
-    fetch_and_write_data >> [insert_into_publication, insert_into_collaboration]
+    check_clouddb_connection = PythonOperator(
+        task_id="check_clouddb_connection",
+        python_callable=checkdbconnection
+    )
 
-'''
-Q1:
-SELECT pid, COUNT(paper_key) AS num_conf_papers
-    FROM publication
-    WHERE pid = '40/2499'
-    AND category = 'conf'
-    AND position = 3
-    AND year > 2011 AND year < 2023;
+    update_clouddb_publication_q1 = PythonOperator(
+        task_id="update_clouddb_publication_q1",
+        python_callable=updateclouddb_q1
+    )
 
-Q2:
-SELECT pid, COUNT(paper_key) AS num_of_pubs
-    FROM publication
-    WHERE pid = 'o/BengChinOoi'
-    AND category IN ('journals', 'conf', 'series', 'reference', 'books')
-    AND position = 2
-    AND year > 2016 AND year < 2023;
+    update_clouddb_publication_q2 = PythonOperator(
+        task_id="update_clouddb_publication_q2",
+        python_callable=updateclouddb_q2
+    )
 
-Q3:
-SELECT pid, coauthor_pid, paper_count
-    FROM collaboration
-    WHERE pid = '40/2499'
-    GROUP BY pid, year, coauthor_pid;
+    update_clouddb_collaboration_q3 = PythonOperator(
+        task_id="update_clouddb_collaboration_q3",
+        python_callable=updateclouddb_q3
+    )
 
-Q4:
-SELECT coauthor_pid, year, MAX(paper_count) AS paper_count
-    FROM collaboration
-    WHERE pid = 'o/BengChinOoi'
-    AND year = 2020
-    GROUP BY pid, year, coauthor_pid;
+    update_clouddb_collaboration_q4 = PythonOperator(
+        task_id="update_clouddb_collaboration_q4",
+        python_callable=updateclouddb_q4
+    )
 
-'''
+    fetch_and_write_data >> [insert_into_publication, insert_into_collaboration] >> check_clouddb_connection >> [update_clouddb_publication_q1, update_clouddb_publication_q2, update_clouddb_collaboration_q3, update_clouddb_collaboration_q4]
